@@ -38,15 +38,22 @@ import {
   
       // Get account from wallet
       const [account] = await walletClient.getAddresses();
+      
+      // Check if the wallet client supports the required methods
+      if (!walletClient.signMessage) {
+        throw new Error('Wallet client does not support signMessage');
+      }
+      
       const smartAccount = await toSimple7702SmartAccount({ 
         client, 
-        owner: { address: account, signMessage: walletClient.signMessage }
+        owner: { 
+          address: account, 
+          signMessage: async ({ message }) => await walletClient.signMessage({ 
+            account, 
+            message 
+          })
+        }
       });
-  
-      // Check if the wallet client supports the required methods
-      if (!walletClient.signMessage || !walletClient.signAuthorization) {
-        throw new Error('Wallet client does not support required methods');
-      }
   
       // Create paymaster configuration
       const paymaster = {
@@ -75,6 +82,9 @@ import {
         },
       };
   
+      // Create bundler transport
+      const bundlerTransport = http(`https://public.pimlico.io/v2/${CHAIN.id}/rpc`);
+      
       // Create bundler client
       const bundlerClient = createBundlerClient({
         account: smartAccount,
@@ -82,7 +92,12 @@ import {
         paymaster,
         userOperation: {
           estimateFeesPerGas: async () => {
-            const { standard: fees } = await bundlerClient.request({
+            // Create a separate client for gas estimation
+            const gasClient = createPublicClient({
+              chain: CHAIN,
+              transport: bundlerTransport,
+            });
+            const { standard: fees } = await gasClient.request({
               method: "pimlico_getUserOperationGasPrice",
             });
             return {
@@ -91,13 +106,13 @@ import {
             };
           },
         },
-        transport: http(`https://public.pimlico.io/v2/${CHAIN.id}/rpc`),
+        transport: bundlerTransport,
       });
   
       // Prepare pool key and hook data
       const poolKey = [
-        POOL_CONFIG.token1,
         POOL_CONFIG.token0,
+        POOL_CONFIG.token1,
         POOL_CONFIG.fee,
         POOL_CONFIG.tickSpacing,
         HOOKS_ADDRESS,
@@ -112,13 +127,6 @@ import {
       );
   
       const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600); // 1 hour
-  
-      // Get authorization
-      const authorization = await walletClient.signAuthorization({
-        chainId: CHAIN.id,
-        nonce: await client.getTransactionCount({ address: account }),
-        contractAddress: smartAccount.authorization.address,
-      });
   
       // Send user operation
       const hash = await bundlerClient.sendUserOperation({
@@ -139,7 +147,6 @@ import {
             ],
           },
         ],
-        authorization,
       });
   
       // Wait for receipt
